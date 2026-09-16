@@ -1,109 +1,33 @@
 /* 運轉手帳本 5.0.2 read-only sync adapter.
- * Verified request/response envelopes from the Android client.
- * No credentials are persisted. No push/write endpoint is implemented.
+ * Supports direct authenticated API calls for diagnostics and a safer localhost bridge mode.
+ * No push/write endpoint is implemented. Browser storage is never used for credentials.
  */
 (function(g){
 'use strict';
 const BASE='https://backup.23.95.165.241.sslip.io';
+const BRIDGE='http://127.0.0.1:8765';
 const EP={pull:'/v2/sync/pull',snapshot:'/v2/sync/snapshot'};
 const LEDGER_TYPES=new Set(['ledger_income','ledger_expense','ledger_time_clock']);
-function headers(idToken,appCheck){
-  if(!idToken||!appCheck) throw new Error('需要目前登入工作階段的 Firebase ID token 與 App Check token');
-  return {'content-type':'application/json','Authorization':'Bearer '+idToken,'X-Firebase-AppCheck':appCheck};
-}
-async function post(path,body,auth){
-  const r=await fetch(BASE+path,{method:'POST',headers:headers(auth.idToken,auth.appCheck),body:JSON.stringify(body)});
-  const text=await r.text(); let json=null; try{json=text?JSON.parse(text):{};}catch{}
-  if(!r.ok) throw new Error('運轉手同步 API '+r.status+(json?.message?'：'+json.message:''));
-  if(!json) throw new Error('運轉手同步 API 回傳非 JSON');
-  return json;
-}
-function positiveSafeInt(v){v=Number(v);return Number.isSafeInteger(v)&&v>0}
-function nonNegativeSafeInt(v){v=Number(v);return Number.isSafeInteger(v)&&v>=0}
-function validateRecord(x){
-  if(!x||typeof x!=='object') return false;
-  const rt=x.recordType??x.record_type, id=x.recordId??x.record_id;
-  return !!rt&&!!id&&positiveSafeInt(x.revision)&&positiveSafeInt(x.sequence);
-}
-function normalizeRecord(x){
-  let p=x.payload??x.record_json??x.recordJson??{};
-  if(typeof p==='string'){try{p=JSON.parse(p)}catch{p={raw:p}}}
-  return {recordType:String(x.recordType??x.record_type),recordId:String(x.recordId??x.record_id),revision:Number(x.revision),sequence:Number(x.sequence),deleted:x.deleted===true||x.deleted===1,payload:p,updatedAt:x.updatedAt??null};
-}
-function dateOnly(v){
-  if(v==null||v==='') return '';
-  const d=typeof v==='number'?new Date(v<1e12?v*1000:v):new Date(v);
-  if(!Number.isNaN(d.getTime())) return d.toISOString().slice(0,10);
-  const m=String(v).match(/\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/);
-  return m?m[0].replaceAll('/','-').split('-').map((x,i)=>i?x.padStart(2,'0'):x).join('-'):'';
-}
-function platformName(p){
-  const v=p.platformType??p.platform??p.platformName??p.customPlatformName??'運轉手';
-  const s=String(v),k=s.toLowerCase().replace(/[^a-z0-9]/g,'');
-  return ({uber:'Uber',line:'LINE GO',linego:'LINE GO','55688':'55688',cash:'現金',ubereats:'Uber Eats',foodpanda:'foodpanda'})[k]||s;
-}
-function ledgerToBookkeeping(r){
-  r=normalizeRecord(r); if(r.deleted||!LEDGER_TYPES.has(r.recordType)) return null;
-  const p=r.payload||{},meta={taxiiiRecordType:r.recordType,taxiiiRecordId:r.recordId,taxiiiRevision:r.revision,taxiiiSequence:r.sequence};
-  if(r.recordType==='ledger_income'){
-    const amount=Number(p.actualIncome??p.fareAmount??p.originalFare??p.amount??0); if(!(amount>0)) return null;
-    const fee=Number(p.platformFeeAmount??0)||0;
-    return {id:'taxiii:'+r.recordId,type:'income',amount,category:platformName(p),date:dateOnly(p.dateTime??p.createdAt),km:Number(p.mileage??0)||0,hours:0,note:[p.note,fee?`平台費 ${fee}`:''].filter(Boolean).join(' · '),source:'運轉手',syncMeta:meta};
-  }
-  if(r.recordType==='ledger_expense'){
-    const amount=Number(p.expense??p.expenseAmount??p.amount??0); if(!(amount>0)) return null;
-    return {id:'taxiii:'+r.recordId,type:'expense',amount,category:String(p.customCategoryName??p.categoryName??p.category??'其他支出'),date:dateOnly(p.dateTime??p.createdAt),km:0,hours:0,note:String(p.note??''),source:'運轉手',syncMeta:meta};
-  }
-  const a=p.clockInTime?new Date(p.clockInTime):null,b=p.clockOutTime?new Date(p.clockOutTime):null;
-  if(!a||Number.isNaN(a.getTime())) return null;
-  const hours=b&&!Number.isNaN(b.getTime())?Math.max(0,(b-a)/36e5):0;
-  return {id:'taxiii:clock:'+r.recordId,type:'income',amount:0,category:'工時',date:dateOnly(p.clockInTime),km:Number(p.mileage??0)||0,hours:+hours.toFixed(2),note:'運轉手工時',source:'運轉手',metaOnly:true,syncMeta:meta};
-}
+function headers(idToken,appCheck){if(!idToken||!appCheck)throw new Error('需要目前登入工作階段的 Firebase ID token 與 App Check token');return {'content-type':'application/json','Authorization':'Bearer '+idToken,'X-Firebase-AppCheck':appCheck};}
+async function parseResponse(r,label){const text=await r.text();let j=null;try{j=text?JSON.parse(text):{};}catch{}if(!r.ok)throw new Error(label+' '+r.status+(j?.message?'：'+j.message:j?.error?'：'+j.error:''));if(!j)throw new Error(label+' 回傳非 JSON');return j;}
+async function directPost(path,body,auth){const r=await fetch(BASE+path,{method:'POST',headers:headers(auth.idToken,auth.appCheck),body:JSON.stringify(body)});return parseResponse(r,'運轉手同步 API');}
+async function bridgePost(path,body){const r=await fetch(BRIDGE+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),cache:'no-store'});return parseResponse(r,'本機同步橋接');}
+async function bridgeHealth(){try{const r=await fetch(BRIDGE+'/health',{cache:'no-store'});return await parseResponse(r,'本機同步橋接');}catch(e){return {ok:false,readOnly:true,sessionReady:false,error:String(e?.message||e)};}}
+function positiveSafeInt(v){v=Number(v);return Number.isSafeInteger(v)&&v>0} function nonNegativeSafeInt(v){v=Number(v);return Number.isSafeInteger(v)&&v>=0}
+function validateRecord(x){if(!x||typeof x!=='object')return false;const rt=x.recordType??x.record_type,id=x.recordId??x.record_id;return !!rt&&!!id&&positiveSafeInt(x.revision)&&positiveSafeInt(x.sequence)}
+function normalizeRecord(x){let p=x.payload??x.record_json??x.recordJson??{};if(typeof p==='string'){try{p=JSON.parse(p)}catch{p={raw:p}}}return {recordType:String(x.recordType??x.record_type),recordId:String(x.recordId??x.record_id),revision:Number(x.revision),sequence:Number(x.sequence),deleted:x.deleted===true||x.deleted===1,payload:p,updatedAt:x.updatedAt??null}}
+function dateOnly(v){if(v==null||v==='')return '';const d=typeof v==='number'?new Date(v<1e12?v*1000:v):new Date(v);if(!Number.isNaN(d.getTime()))return d.toISOString().slice(0,10);const m=String(v).match(/\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/);return m?m[0].replaceAll('/','-').split('-').map((x,i)=>i?x.padStart(2,'0'):x).join('-'):''}
+function platformName(p){const v=p.platformType??p.platform??p.platformName??p.customPlatformName??'運轉手',s=String(v),k=s.toLowerCase().replace(/[^a-z0-9]/g,'');return ({uber:'Uber',line:'LINE GO',linego:'LINE GO','55688':'55688',cash:'現金',ubereats:'Uber Eats',foodpanda:'foodpanda'})[k]||s}
+function ledgerToBookkeeping(r){r=normalizeRecord(r);if(r.deleted||!LEDGER_TYPES.has(r.recordType))return null;const p=r.payload||{},meta={taxiiiRecordType:r.recordType,taxiiiRecordId:r.recordId,taxiiiRevision:r.revision,taxiiiSequence:r.sequence};if(r.recordType==='ledger_income'){const amount=Number(p.actualIncome??p.fareAmount??p.originalFare??p.amount??0);if(!(amount>0))return null;const fee=Number(p.platformFeeAmount??0)||0;return {id:'taxiii:'+r.recordId,type:'income',amount,category:platformName(p),date:dateOnly(p.dateTime??p.createdAt),km:Number(p.mileage??0)||0,hours:0,note:[p.note,fee?`平台費 ${fee}`:''].filter(Boolean).join(' · '),source:'運轉手',syncMeta:meta}}if(r.recordType==='ledger_expense'){const amount=Number(p.expense??p.expenseAmount??p.amount??0);if(!(amount>0))return null;return {id:'taxiii:'+r.recordId,type:'expense',amount,category:String(p.customCategoryName??p.categoryName??p.category??'其他支出'),date:dateOnly(p.dateTime??p.createdAt),km:0,hours:0,note:String(p.note??''),source:'運轉手',syncMeta:meta}}const a=p.clockInTime?new Date(p.clockInTime):null,b=p.clockOutTime?new Date(p.clockOutTime):null;if(!a||Number.isNaN(a.getTime()))return null;const hours=b&&!Number.isNaN(b.getTime())?Math.max(0,(b-a)/36e5):0;return {id:'taxiii:clock:'+r.recordId,type:'income',amount:0,category:'工時',date:dateOnly(p.clockInTime),km:Number(p.mileage??0)||0,hours:+hours.toFixed(2),note:'運轉手工時',source:'運轉手',metaOnly:true,syncMeta:meta}}
 function mapLedgerRecords(records){return records.map(ledgerToBookkeeping).filter(Boolean)}
-function pullRequest(deviceId,cursor=0,limit=100){
-  if(!deviceId) throw new Error('缺少 deviceId');
-  if(!nonNegativeSafeInt(cursor)) throw new Error('cursor 必須是非負安全整數');
-  if(!positiveSafeInt(limit)) throw new Error('limit 必須是正安全整數');
-  return {deviceId:String(deviceId),cursor:Number(cursor),limit:Number(limit)};
-}
-function snapshotRequest(deviceId,snapshotSequence,afterRecordType=null,afterRecordId=null,limit=100){
-  if(!deviceId) throw new Error('缺少 deviceId');
-  if(!positiveSafeInt(snapshotSequence)) throw new Error('snapshotSequence 必須是正安全整數');
-  if(!positiveSafeInt(limit)) throw new Error('limit 必須是正安全整數');
-  if((afterRecordType==null)!==(afterRecordId==null)) throw new Error('afterRecordType 與 afterRecordId 必須同時存在或同時為 null');
-  return {deviceId:String(deviceId),snapshotSequence:Number(snapshotSequence),afterRecordType:afterRecordType==null?null:String(afterRecordType),afterRecordId:afterRecordId==null?null:String(afterRecordId),limit:Number(limit)};
-}
-async function pullPage(auth,request){
-  const j=await post(EP.pull,request,auth);
-  const records=Array.isArray(j.records)?j.records.filter(validateRecord).map(normalizeRecord):[];
-  return {records,nextCursor:j.nextCursor,headSequence:j.headSequence,hasMore:!!j.hasMore};
-}
-async function snapshotPage(auth,request){
-  const j=await post(EP.snapshot,request,auth);
-  const records=Array.isArray(j.records)?j.records.filter(validateRecord).map(normalizeRecord):[];
-  return {records,snapshotSequence:j.snapshotSequence,hasMore:!!j.hasMore,nextPage:j.nextPage??null};
-}
-async function collectPull(auth,deviceId,cursor=0,limit=100,maxPages=100){
-  let out=[],current=Number(cursor),headSequence=null;
-  for(let page=0;page<maxPages;page++){
-    const r=await pullPage(auth,pullRequest(deviceId,current,limit)); out.push(...r.records); headSequence=r.headSequence;
-    if(!r.hasMore) return {records:out,ledger:mapLedgerRecords(out),headSequence:r.headSequence,nextCursor:r.nextCursor};
-    const next=Number(r.nextCursor); if(!nonNegativeSafeInt(next)||next<=current) throw new Error('同步 nextCursor 無效或未前進');
-    current=next;
-  }
-  throw new Error('同步頁數超過安全上限');
-}
-async function collectSnapshot(auth,deviceId,snapshotSequence,limit=100,maxPages=100){
-  let out=[],afterType=null,afterId=null,seq=Number(snapshotSequence);
-  for(let page=0;page<maxPages;page++){
-    const r=await snapshotPage(auth,snapshotRequest(deviceId,seq,afterType,afterId,limit)); out.push(...r.records);
-    if(positiveSafeInt(r.snapshotSequence)) seq=Number(r.snapshotSequence);
-    if(!r.hasMore) return {records:out,ledger:mapLedgerRecords(out),snapshotSequence:seq};
-    const n=r.nextPage; if(!n||!n.recordType||!n.recordId) throw new Error('snapshot 尚有下一頁但 nextPage 無效');
-    if(n.recordType===afterType&&n.recordId===afterId) throw new Error('snapshot nextPage 未前進');
-    afterType=String(n.recordType); afterId=String(n.recordId);
-  }
-  throw new Error('snapshot 頁數超過安全上限');
-}
-g.TaxiiiSync={BASE,EP,LEDGER_TYPES,pullRequest,snapshotRequest,pullPage,snapshotPage,collectPull,collectSnapshot,normalizeRecord,ledgerToBookkeeping,mapLedgerRecords};
+function pullRequest(deviceId,cursor=0,limit=100){if(!deviceId)throw new Error('缺少 deviceId');if(!nonNegativeSafeInt(cursor))throw new Error('cursor 必須是非負安全整數');if(!positiveSafeInt(limit))throw new Error('limit 必須是正安全整數');return {deviceId:String(deviceId),cursor:Number(cursor),limit:Number(limit)}}
+function snapshotRequest(deviceId,snapshotSequence,afterRecordType=null,afterRecordId=null,limit=100){if(!deviceId)throw new Error('缺少 deviceId');if(!positiveSafeInt(snapshotSequence))throw new Error('snapshotSequence 必須是正安全整數');if(!positiveSafeInt(limit))throw new Error('limit 必須是正安全整數');if((afterRecordType==null)!==(afterRecordId==null))throw new Error('afterRecordType 與 afterRecordId 必須同時存在或同時為 null');return {deviceId:String(deviceId),snapshotSequence:Number(snapshotSequence),afterRecordType:afterRecordType==null?null:String(afterRecordType),afterRecordId:afterRecordId==null?null:String(afterRecordId),limit:Number(limit)}}
+function transport(mode,auth){if(mode==='bridge')return (p,b)=>bridgePost(p,b);if(mode==='direct')return (p,b)=>directPost(p,b,auth||{});throw new Error('未知同步模式')}
+async function pullPage(auth,request,mode='direct'){const j=await transport(mode,auth)(EP.pull,request),records=Array.isArray(j.records)?j.records.filter(validateRecord).map(normalizeRecord):[];return {records,nextCursor:j.nextCursor,headSequence:j.headSequence,hasMore:!!j.hasMore}}
+async function snapshotPage(auth,request,mode='direct'){const j=await transport(mode,auth)(EP.snapshot,request),records=Array.isArray(j.records)?j.records.filter(validateRecord).map(normalizeRecord):[];return {records,snapshotSequence:j.snapshotSequence,hasMore:!!j.hasMore,nextPage:j.nextPage??null}}
+async function collectPull(auth,deviceId,cursor=0,limit=100,maxPages=100,mode='direct'){let out=[],current=Number(cursor);for(let page=0;page<maxPages;page++){const r=await pullPage(auth,pullRequest(deviceId,current,limit),mode);out.push(...r.records);if(!r.hasMore)return {records:out,ledger:mapLedgerRecords(out),headSequence:r.headSequence,nextCursor:r.nextCursor};const next=Number(r.nextCursor);if(!nonNegativeSafeInt(next)||next<=current)throw new Error('同步 nextCursor 無效或未前進');current=next}throw new Error('同步頁數超過安全上限')}
+async function collectSnapshot(auth,deviceId,snapshotSequence,limit=100,maxPages=100,mode='direct'){let out=[],afterType=null,afterId=null,seq=Number(snapshotSequence);for(let page=0;page<maxPages;page++){const r=await snapshotPage(auth,snapshotRequest(deviceId,seq,afterType,afterId,limit),mode);out.push(...r.records);if(positiveSafeInt(r.snapshotSequence))seq=Number(r.snapshotSequence);if(!r.hasMore)return {records:out,ledger:mapLedgerRecords(out),snapshotSequence:seq};const n=r.nextPage;if(!n||!n.recordType||!n.recordId)throw new Error('snapshot 尚有下一頁但 nextPage 無效');if(n.recordType===afterType&&n.recordId===afterId)throw new Error('snapshot nextPage 未前進');afterType=String(n.recordType);afterId=String(n.recordId)}throw new Error('snapshot 頁數超過安全上限')}
+async function bridgePull(deviceId,cursor=0,limit=100,maxPages=100){return collectPull(null,deviceId,cursor,limit,maxPages,'bridge')}
+async function bridgeSnapshot(deviceId,snapshotSequence,limit=100,maxPages=100){return collectSnapshot(null,deviceId,snapshotSequence,limit,maxPages,'bridge')}
+g.TaxiiiSync={BASE,BRIDGE,EP,LEDGER_TYPES,bridgeHealth,bridgePull,bridgeSnapshot,pullRequest,snapshotRequest,pullPage,snapshotPage,collectPull,collectSnapshot,normalizeRecord,ledgerToBookkeeping,mapLedgerRecords};
 })(window);
