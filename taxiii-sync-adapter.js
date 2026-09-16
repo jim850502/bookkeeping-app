@@ -1,4 +1,5 @@
 /* 運轉手帳本 5.0.2 read-only sync adapter.
+ * Verified request/response envelopes from the Android client.
  * No credentials are persisted. No push/write endpoint is implemented.
  */
 (function(g){
@@ -17,16 +18,17 @@ async function post(path,body,auth){
   if(!json) throw new Error('運轉手同步 API 回傳非 JSON');
   return json;
 }
+function positiveSafeInt(v){v=Number(v);return Number.isSafeInteger(v)&&v>0}
+function nonNegativeSafeInt(v){v=Number(v);return Number.isSafeInteger(v)&&v>=0}
 function validateRecord(x){
   if(!x||typeof x!=='object') return false;
   const rt=x.recordType??x.record_type, id=x.recordId??x.record_id;
-  const rev=Number(x.revision), seq=Number(x.sequence);
-  return !!rt&&!!id&&Number.isSafeInteger(rev)&&rev>0&&Number.isSafeInteger(seq)&&seq>0;
+  return !!rt&&!!id&&positiveSafeInt(x.revision)&&positiveSafeInt(x.sequence);
 }
 function normalizeRecord(x){
   let p=x.payload??x.record_json??x.recordJson??{};
   if(typeof p==='string'){try{p=JSON.parse(p)}catch{p={raw:p}}}
-  return {recordType:String(x.recordType??x.record_type),recordId:String(x.recordId??x.record_id),revision:Number(x.revision),sequence:Number(x.sequence),deleted:x.deleted===true||x.deleted===1,payload:p};
+  return {recordType:String(x.recordType??x.record_type),recordId:String(x.recordId??x.record_id),revision:Number(x.revision),sequence:Number(x.sequence),deleted:x.deleted===true||x.deleted===1,payload:p,updatedAt:x.updatedAt??null};
 }
 function dateOnly(v){
   if(v==null||v==='') return '';
@@ -44,8 +46,7 @@ function ledgerToBookkeeping(r){
   r=normalizeRecord(r); if(r.deleted||!LEDGER_TYPES.has(r.recordType)) return null;
   const p=r.payload||{},meta={taxiiiRecordType:r.recordType,taxiiiRecordId:r.recordId,taxiiiRevision:r.revision,taxiiiSequence:r.sequence};
   if(r.recordType==='ledger_income'){
-    const amount=Number(p.actualIncome??p.fareAmount??p.originalFare??p.amount??0);
-    if(!(amount>0)) return null;
+    const amount=Number(p.actualIncome??p.fareAmount??p.originalFare??p.amount??0); if(!(amount>0)) return null;
     const fee=Number(p.platformFeeAmount??0)||0;
     return {id:'taxiii:'+r.recordId,type:'income',amount,category:platformName(p),date:dateOnly(p.dateTime??p.createdAt),km:Number(p.mileage??0)||0,hours:0,note:[p.note,fee?`平台費 ${fee}`:''].filter(Boolean).join(' · '),source:'運轉手',syncMeta:meta};
   }
@@ -56,33 +57,53 @@ function ledgerToBookkeeping(r){
   const a=p.clockInTime?new Date(p.clockInTime):null,b=p.clockOutTime?new Date(p.clockOutTime):null;
   if(!a||Number.isNaN(a.getTime())) return null;
   const hours=b&&!Number.isNaN(b.getTime())?Math.max(0,(b-a)/36e5):0;
-  const km=Math.max(0,Number(p.clockOutMileageKm??0)-Number(p.clockInMileageKm??0));
-  return {id:'taxiii:clock:'+r.recordId,type:'income',amount:0,category:'工時',date:dateOnly(p.clockInTime),km,hours:+hours.toFixed(2),note:'運轉手工時',source:'運轉手',metaOnly:true,syncMeta:meta};
+  return {id:'taxiii:clock:'+r.recordId,type:'income',amount:0,category:'工時',date:dateOnly(p.clockInTime),km:Number(p.mileage??0)||0,hours:+hours.toFixed(2),note:'運轉手工時',source:'運轉手',metaOnly:true,syncMeta:meta};
 }
 function mapLedgerRecords(records){return records.map(ledgerToBookkeeping).filter(Boolean)}
+function pullRequest(deviceId,cursor=0,limit=100){
+  if(!deviceId) throw new Error('缺少 deviceId');
+  if(!nonNegativeSafeInt(cursor)) throw new Error('cursor 必須是非負安全整數');
+  if(!positiveSafeInt(limit)) throw new Error('limit 必須是正安全整數');
+  return {deviceId:String(deviceId),cursor:Number(cursor),limit:Number(limit)};
+}
+function snapshotRequest(deviceId,snapshotSequence,afterRecordType=null,afterRecordId=null,limit=100){
+  if(!deviceId) throw new Error('缺少 deviceId');
+  if(!positiveSafeInt(snapshotSequence)) throw new Error('snapshotSequence 必須是正安全整數');
+  if(!positiveSafeInt(limit)) throw new Error('limit 必須是正安全整數');
+  if((afterRecordType==null)!==(afterRecordId==null)) throw new Error('afterRecordType 與 afterRecordId 必須同時存在或同時為 null');
+  return {deviceId:String(deviceId),snapshotSequence:Number(snapshotSequence),afterRecordType:afterRecordType==null?null:String(afterRecordType),afterRecordId:afterRecordId==null?null:String(afterRecordId),limit:Number(limit)};
+}
 async function pullPage(auth,request){
   const j=await post(EP.pull,request,auth);
   const records=Array.isArray(j.records)?j.records.filter(validateRecord).map(normalizeRecord):[];
-  return {...j,records};
+  return {records,nextCursor:j.nextCursor,headSequence:j.headSequence,hasMore:!!j.hasMore};
 }
 async function snapshotPage(auth,request){
   const j=await post(EP.snapshot,request,auth);
   const records=Array.isArray(j.records)?j.records.filter(validateRecord).map(normalizeRecord):[];
-  return {...j,records};
+  return {records,snapshotSequence:j.snapshotSequence,hasMore:!!j.hasMore,nextPage:j.nextPage??null};
 }
-/* Caller supplies the exact request shape after it has been verified from the client.
-   This deliberately avoids guessing cursor/device/page fields. */
-async function collectPull(auth,firstRequest,nextRequest,maxPages=100){
-  let req=firstRequest,out=[],last=-1;
+async function collectPull(auth,deviceId,cursor=0,limit=100,maxPages=100){
+  let out=[],current=Number(cursor),headSequence=null;
   for(let page=0;page<maxPages;page++){
-    const r=await pullPage(auth,req); out.push(...r.records);
-    const cursor=Number(r.nextCursor??r.headSequence??-1);
-    if(Number.isSafeInteger(cursor)&&cursor>=0){if(last>=0&&cursor<last)throw new Error('同步 cursor 倒退');last=cursor;}
+    const r=await pullPage(auth,pullRequest(deviceId,current,limit)); out.push(...r.records); headSequence=r.headSequence;
     if(!r.hasMore) return {records:out,ledger:mapLedgerRecords(out),headSequence:r.headSequence,nextCursor:r.nextCursor};
-    if(typeof nextRequest!=='function') throw new Error('API 尚有下一頁，但尚未提供已驗證的分頁 request builder');
-    req=nextRequest(req,r);
+    const next=Number(r.nextCursor); if(!nonNegativeSafeInt(next)||next<=current) throw new Error('同步 nextCursor 無效或未前進');
+    current=next;
   }
   throw new Error('同步頁數超過安全上限');
 }
-g.TaxiiiSync={BASE,EP,LEDGER_TYPES,pullPage,snapshotPage,collectPull,normalizeRecord,ledgerToBookkeeping,mapLedgerRecords};
+async function collectSnapshot(auth,deviceId,snapshotSequence,limit=100,maxPages=100){
+  let out=[],afterType=null,afterId=null,seq=Number(snapshotSequence);
+  for(let page=0;page<maxPages;page++){
+    const r=await snapshotPage(auth,snapshotRequest(deviceId,seq,afterType,afterId,limit)); out.push(...r.records);
+    if(positiveSafeInt(r.snapshotSequence)) seq=Number(r.snapshotSequence);
+    if(!r.hasMore) return {records:out,ledger:mapLedgerRecords(out),snapshotSequence:seq};
+    const n=r.nextPage; if(!n||!n.recordType||!n.recordId) throw new Error('snapshot 尚有下一頁但 nextPage 無效');
+    if(n.recordType===afterType&&n.recordId===afterId) throw new Error('snapshot nextPage 未前進');
+    afterType=String(n.recordType); afterId=String(n.recordId);
+  }
+  throw new Error('snapshot 頁數超過安全上限');
+}
+g.TaxiiiSync={BASE,EP,LEDGER_TYPES,pullRequest,snapshotRequest,pullPage,snapshotPage,collectPull,collectSnapshot,normalizeRecord,ledgerToBookkeeping,mapLedgerRecords};
 })(window);
