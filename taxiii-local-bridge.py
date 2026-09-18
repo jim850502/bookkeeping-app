@@ -15,14 +15,14 @@ Use only short-lived credentials legitimately issued for your own signed-in sess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-import json, time
+import json, time, re
 
 HOST = "127.0.0.1"
 PORT = 8765
 UPSTREAM = "https://backup.23.95.165.241.sslip.io"
 ALLOWED_ORIGIN = "https://jim850502.github.io"
 SESSION_MAX_AGE = 45 * 60
-SESSION = {"idToken": None, "appCheck": None, "setAt": None}
+SESSION = {"idToken": None, "appCheck": None, "setAt": None}\nUUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
 def clear_session():
@@ -113,7 +113,7 @@ def upstream(path, body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TaxiiiReadOnlyBridge/0.2"
+    server_version = "TaxiiiReadOnlyBridge/0.3"
 
     def log_message(self, fmt, *args):
         # Never log request bodies, headers, tokens, or upstream response bodies.
@@ -135,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
             age = session_age()
             return reply(self, 200, {
                 "ok": True,
-                "version": "0.2",
+                "version": "0.3",
                 "readOnly": True,
                 "sessionReady": session_ready(),
                 "sessionAgeSeconds": age,
@@ -173,6 +173,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Taxiii read-only bridge v0.2: http://{HOST}:{PORT}")
+    print(f"Taxiii read-only bridge v0.3: http://{HOST}:{PORT}")
     print("Only pull/snapshot are enabled. Credentials remain in RAM and expire locally.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
