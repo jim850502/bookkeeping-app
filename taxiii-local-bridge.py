@@ -49,7 +49,7 @@ def reply(h, status, obj):
     origin = h.headers.get("Origin")
     if origin == ALLOWED_ORIGIN:
         h.send_header("Access-Control-Allow-Origin", origin)
-        h.send_header("Vary", "Origin")
+        h.send_header("Vary", "Origin")\n        h.send_header("Access-Control-Allow-Private-Network", "true")
     h.end_headers()
     h.wfile.write(data)
 
@@ -113,7 +113,7 @@ def upstream(path, body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TaxiiiReadOnlyBridge/0.3"
+    server_version = "TaxiiiReadOnlyBridge/0.4"
 
     def log_message(self, fmt, *args):
         # Never log request bodies, headers, tokens, or upstream response bodies.
@@ -126,7 +126,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")\n        if self.headers.get("Access-Control-Request-Private-Network") == "true":\n            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
@@ -135,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
             age = session_age()
             return reply(self, 200, {
                 "ok": True,
-                "version": "0.3",
+                "version": "0.4",
                 "readOnly": True,
                 "sessionReady": session_ready(),
                 "sessionAgeSeconds": age,
@@ -173,6 +173,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Taxiii read-only bridge v0.3: http://{HOST}:{PORT}")
+    print(f"Taxiii read-only bridge v0.4: http://{HOST}:{PORT}")
     print("Only pull/snapshot are enabled. Credentials remain in RAM and expire locally.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
