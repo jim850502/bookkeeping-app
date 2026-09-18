@@ -79,3 +79,9 @@ Until one of those integration points exists, `/session` is a transport contract
 ## deviceId
 
 The verified Taxiii installation identifier is a lowercase UUID v4 and is used as the sync `deviceId`. The bookkeeping UI may remember `deviceId`; this is not an authentication credential.
+
+## Stock APK 5.0.2 integration check
+
+Static inspection of the user's supplied production APK confirms Firebase Auth and Firebase App Check are bundled, including Play Integrity token handling. No verified exported integration was found that would let an unrelated companion app inherit the stock app's authenticated Firebase/App Check identity.
+
+Therefore the production-safe implementation must not attempt to impersonate the stock APK, forge App Check, read another app's private storage, or defeat Android app isolation. The direct-cloud button remains gated on a legitimate session handoff. Until such a handoff exists, the supported usable path is explicit Taxiii backup/export import; the bridge stays read-only and ready for an authorized handoff if Taxiii exposes one later.
