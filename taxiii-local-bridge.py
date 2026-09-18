@@ -22,11 +22,11 @@ PORT = 8765
 UPSTREAM = "https://backup.23.95.165.241.sslip.io"\nAPP_URL = "https://jim850502.github.io/bookkeeping-app/"
 ALLOWED_ORIGIN = "https://jim850502.github.io"
 SESSION_MAX_AGE = 45 * 60
-SESSION = {"idToken": None, "appCheck": None, "setAt": None}\nUUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+SESSION = {"idToken": None, "appCheck": None, "setAt": None, "deviceId": None}\nUUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
 def clear_session():
-    SESSION.update(idToken=None, appCheck=None, setAt=None)
+    SESSION.update(idToken=None, appCheck=None, setAt=None, deviceId=None)
 
 
 def session_age():
@@ -113,7 +113,7 @@ def upstream(path, body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TaxiiiReadOnlyBridge/0.5"
+    server_version = "TaxiiiReadOnlyBridge/0.6"
 
     def log_message(self, fmt, *args):
         # Never log request bodies, headers, tokens, or upstream response bodies.
@@ -135,11 +135,11 @@ class Handler(BaseHTTPRequestHandler):
             age = session_age()
             return reply(self, 200, {
                 "ok": True,
-                "version": "0.5",
+                "version": "0.6",
                 "readOnly": True,
                 "sessionReady": session_ready(),
                 "sessionAgeSeconds": age,
-                "sessionMaxAgeSeconds": SESSION_MAX_AGE,
+                "sessionMaxAgeSeconds": SESSION_MAX_AGE,\n                "deviceId": SESSION["deviceId"] if session_ready() else None,
             })
         return reply(self, 404, {"error": "not found"})
 
@@ -154,12 +154,12 @@ class Handler(BaseHTTPRequestHandler):
             body = read_json(self)
             if self.path == "/session":
                 a = str(body.get("idToken", "")).strip()
-                c = str(body.get("appCheck", "")).strip()
+                c = str(body.get("appCheck", "")).strip()\n                d = str(body.get("deviceId", "")).strip()
                 if not a or not c:
                     return reply(self, 400, {"error": "idToken/appCheck required"})
                 if len(a) > 8192 or len(c) > 8192:
                     return reply(self, 400, {"error": "credential too large"})
-                SESSION.update(idToken=a, appCheck=c, setAt=int(time.time()))
+                SESSION.update(idToken=a, appCheck=c, setAt=int(time.time()), deviceId=d or None)
                 return reply(self, 200, {"ok": True, "stored": "memory-only", "expiresInSeconds": SESSION_MAX_AGE})
             if self.path == "/pull":
                 status, obj = upstream("/v2/sync/pull", body)
@@ -173,6 +173,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Taxiii read-only bridge v0.5: http://{HOST}:{PORT}")
+    print(f"Taxiii read-only bridge v0.6: http://{HOST}:{PORT}")
     print("Only pull/snapshot are enabled. Credentials remain in RAM and expire locally.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
