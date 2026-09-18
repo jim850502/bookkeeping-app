@@ -11,22 +11,24 @@ function calculateFeeMethod(fare,m){fare=Math.max(0,num(fare));m=m||{};const t=N
 function calculatePlatformFee(fare,methods){fare=Math.max(0,num(fare));if(!Array.isArray(methods)||!methods.length)return 0;return methods.reduce((s,m)=>s+calculateFeeMethod(fare,m),0)}
 // Built-in multi-purpose taxi commission methods verified from 運轉手帳本 5.0.2 ARM64 AOT.
 // Deliberately excludes ambiguous "淨收入" / "15%" branches until their outer platform dispatch is fully mapped.
-function calculateBuiltInCommission(fare,commissionType){fare=Math.max(0,num(fare));const c=String(commissionType??'');let fee=null;
-if(c==='一般(15%)')fee=fare*.15;
-else if(c==='特約（10元）')fee=fare*.15+10;
-else if(c==='一般'||c==='12.5%')fee=fare*.125;
-else if(c==='現金')fee=fare*.10;
-else if(c==='刷卡')fee=fare*.117;
-else if(c==='據點(5元)')fee=fare*.10+5;
-else if(c==='據點(20元)')fee=fare*.10+20;
-else if(c==='10元')fee=10;
-else if(c==='婦派')fee=fare*(1-.9*.875);
-else if(c==='海派')fee=fare*(fare>=300?.20:.15);
-else if(c==='鑽派')fee=fare*.20;
-else if(c==='超派（現金）')fee=fare*.30;
-else if(c==='超派（刷卡）')fee=fare*.27;
-else if(c==='原始車資')fee=fare*.20;
-if(fee==null)return null;fee=Math.round(fee);return{platformFee:fee,actualIncome:Math.round(fare-fee),commissionType:c,verifiedFrom:'5.0.2-arm64-aot'}}
+function calculateBuiltInCommission(fare,commissionType){fare=Math.max(0,num(fare));const c=String(commissionType??'');let rawFee=null,rawActual=null;
+if(c==='一般(15%)'){rawFee=fare*.15;rawActual=fare*.85}
+else if(c==='特約（10元）'){rawFee=fare*.15+10;rawActual=fare*.85-10}
+else if(c==='一般'||c==='12.5%'||c==='15%'){rawFee=fare*.125;rawActual=fare*.875}
+else if(c==='現金'){rawFee=fare*.10;rawActual=fare*.90}
+else if(c==='刷卡'){rawFee=fare*.117;rawActual=fare-fare*.10-fare*.017}
+else if(c==='據點(5元)'){rawFee=fare*.10+5;rawActual=fare*.90-5}
+else if(c==='據點(20元)'){rawFee=fare*.10+20;rawActual=fare*.90-20}
+else if(c==='淨收入'){rawFee=fare*.195;rawActual=fare-Math.round(fare*.195)}
+else if(c==='10元'){rawFee=10;rawActual=fare-10}
+else if(c==='婦派'){rawFee=fare*(1-.9*.875);rawActual=fare*.9*.875}
+else if(c==='海派'){rawFee=fare*(fare>=300?.20:.15);rawActual=fare*(fare>=300?.80:.85)}
+else if(c==='鑽派'){rawFee=fare*.20;rawActual=fare*.80}
+else if(c==='超派（現金）'){rawFee=fare*.30;rawActual=fare*.70}
+else if(c==='超派（刷卡）'){rawFee=fare*.27;rawActual=fare*.73}
+else if(c==='原始車資'){rawFee=fare*.20;rawActual=fare*.80}
+if(rawFee==null)return null;return{platformFee:Math.round(rawFee),actualIncome:Math.round(Math.max(0,rawActual)),commissionType:c,verifiedFrom:'5.0.2-arm64-aot'}}
+
 function reconcileFare(p,cp){const fare=num(p.fareAmount),storedFee=num(p.platformFeeAmount),actual=num(p.actualIncome),tip=num(p.tip),methods=Array.isArray(cp?.feeMethods)?cp.feeMethods:[],builtin=!methods.length?calculateBuiltInCommission(fare,p.commissionType):null,computedFee=methods.length?Math.round(calculatePlatformFee(fare,methods)):(builtin?.platformFee??null),computedActual=methods.length?Math.round(Math.max(0,fare-computedFee)):(builtin?.actualIncome??null);return{passengerFare:fare,storedPlatformFee:storedFee,computedPlatformFee:computedFee,platformFeeDelta:computedFee==null?null:+(storedFee-computedFee).toFixed(4),storedActualIncome:actual,computedActualIncome:computedActual,actualIncomeDelta:computedActual==null?null:+(actual-computedActual).toFixed(4),feeMatched:computedFee==null?null:Math.abs(storedFee-computedFee)<0.01,actualMatched:computedActual==null?null:Math.abs(actual-computedActual)<0.01,commissionFormula:builtin?.verifiedFrom??(methods.length?'custom-fee-method':null),tip}}
 function dateOnly(v){if(v==null||v==='')return'';const d=typeof v==='number'?new Date(v<1e12?v*1000:v):new Date(v);if(!Number.isNaN(d.getTime()))return d.toISOString().slice(0,10);const m=String(v).match(/\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/);return m?m[0].replaceAll('/','-').split('-').map((x,i)=>i?x.padStart(2,'0'):x).join('-'):''}
 function platformName(p,c){const id=p.customPlatformId!=null?String(p.customPlatformId):'',x=id&&c?.get(id);if(x)return String(x.name??'自訂平台');const s=String(p.customPlatformName??p.platformType??p.platform??p.platformName??'運轉手'),k=s.toLowerCase().replace(/[^a-z0-9]/g,'');return({uber:'Uber',linetaxi:'LINE GO',line:'LINE GO',linego:'LINE GO',taiwantaxi:'55688',metropolis:'大都會',yoxi:'yoxi',bolt:'Bolt',streethail:'路招',normaltaxi:'一般計程車',cash:'現金',ubereats:'Uber Eats',foodpanda:'foodpanda'})[k]||s}
